@@ -1,40 +1,43 @@
-﻿
 using System;
 using System.Diagnostics;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using Konscious.Security.Cryptography;
 
 public class Program
 {
     static void Main()
     {
-        Console.Clear();
+        RensaSkarm();
+        Console.OutputEncoding = Encoding.UTF8;
         SkrivRubrik("Hash Demo - Med och utan Salt");
-        
+
         while (true)
         {
             Console.WriteLine();
             SkrivLabel("Välj ett alternativ:");
             Console.WriteLine("  1. Hasha text UTAN salt");
             Console.WriteLine("  2. Hasha text MED salt");
-            Console.WriteLine("  3. Prestandatest - Jämför metoder");
+            Console.WriteLine("  3. Prestandatest - MD5, SHA-256, PBKDF2 och Argon2id");
             Console.WriteLine("  4. Avsluta");
             Console.WriteLine();
             SkrivPrompt("Ditt val: ");
-            var val = Console.ReadLine();			switch (val)
-			{
-				case "1":
-					HashUtanSalt();
-					break;
-				case "2":
-					HashMedSalt();
-					break;
-				case "3":
-					PrestandaTest();
-					break;
-				case "4":
-					return;
+            var val = Console.ReadLine();
+
+            switch (val)
+            {
+                case "1":
+                    HashUtanSalt();
+                    break;
+                case "2":
+                    HashMedSalt();
+                    break;
+                case "3":
+                    PrestandaTest();
+                    break;
+                case "4":
+                    return;
                 default:
                     // Kontrollera för easter egg hash
                     if (!string.IsNullOrEmpty(val) && KontrolleraEasterEggHash(val))
@@ -48,6 +51,12 @@ public class Program
                     break;
             }
         }
+    }
+
+    static void RensaSkarm()
+    {
+        // Console.Clear() kastar när utdata är omdirigerad, exempelvis i en pipeline.
+        try { Console.Clear(); } catch (IOException) { }
     }
 
     static void SkrivRubrik(string text)
@@ -89,7 +98,7 @@ public class Program
         Console.WriteLine(text);
         Console.ResetColor();
     }
-    
+
     static void HashUtanSalt()
     {
         Console.WriteLine();
@@ -122,13 +131,37 @@ public class Program
         SkrivVärde("Hash (med salt): ", hash);
     }
 
+    // ===== PRESTANDATEST: snabba hashar mot nyckelderiveringsfunktioner =====
+
+    /// <summary>
+    /// Arbetskostnad för de två nyckelderiveringsfunktionerna. Riktvärdet i produktion
+    /// är 250 till 500 millisekunder per inloggning, mätt på produktionshårdvaran.
+    /// </summary>
+    sealed record Arbetskostnad(
+        string Namn,
+        int Pbkdf2Iterationer,
+        int Argon2MinneKib,
+        int Argon2Iterationer);
+
+    static readonly Arbetskostnad[] Nivåer =
+    [
+        new("1. Låg      (för svag 2026)", 100_000, 8 * 1024, 1),
+        new("2. Standard (OWASP-rekommendation)", 600_000, 19 * 1024, 2),
+        new("3. Hög      (känsliga system)", 1_200_000, 64 * 1024, 3)
+    ];
+
     static void PrestandaTest()
     {
         Console.WriteLine();
-        SkrivLabel("Prestandatest - Jämför hashning med och utan salt");
+        SkrivLabel("Prestandatest - hur dyr är en gissning för en angripare?");
         Console.WriteLine();
-        
-        SkrivPrompt("Ange text att testa: ");
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine("MD5 och SHA-256 är byggda för att vara snabba.");
+        Console.WriteLine("PBKDF2 och Argon2id är byggda för att vara långsamma. Det är hela poängen.");
+        Console.ResetColor();
+        Console.WriteLine();
+
+        SkrivPrompt("Ange text att testa (exempelvis ett lösenord): ");
         string? input = Console.ReadLine();
         if (string.IsNullOrEmpty(input))
         {
@@ -136,71 +169,139 @@ public class Program
             return;
         }
 
-        SkrivPrompt("Antal iterationer (rekommenderat: 10000): ");
-        string? iterationInput = Console.ReadLine();
-        if (!int.TryParse(iterationInput, out int iterations) || iterations <= 0)
+        SkrivPrompt("Antal iterationer för de snabba hasharna (rekommenderat: 10000): ");
+        if (!int.TryParse(Console.ReadLine(), out int iterations) || iterations <= 0)
         {
-            iterations = 10000;
+            iterations = 10_000;
             Console.WriteLine($"Använder standardvärde: {iterations} iterationer");
         }
 
         Console.WriteLine();
-        SkrivLabel("Startar prestandatest...");
+        SkrivLabel("Välj arbetskostnad för PBKDF2 och Argon2id:");
+        foreach (var nivå in Nivåer)
+        {
+            Console.WriteLine($"  {nivå.Namn}");
+        }
+        Console.WriteLine();
+        SkrivPrompt("Nivå (1-3, standard 2): ");
+        if (!int.TryParse(Console.ReadLine(), out int nivåVal) || nivåVal < 1 || nivåVal > 3)
+        {
+            nivåVal = 2;
+        }
+        var kostnad = Nivåer[nivåVal - 1];
+
+        byte[] salt = RandomNumberGenerator.GetBytes(16);
+
+        Console.WriteLine();
+        SkrivLabel("Startar prestandatest, Argon2id tar några sekunder...");
         Console.WriteLine();
 
-        // Test utan salt
-        Stopwatch sw = Stopwatch.StartNew();
-        for (int i = 0; i < iterations; i++)
-        {
-            BeraknaHash(input);
-        }
-        sw.Stop();
-        double tidUtanSalt = sw.Elapsed.TotalMilliseconds;
+        // Konverteringen till byte ligger utanför mätningen. Annars mäter vi
+        // stränghanteringen i stället för hashningen, den är dyrare än MD5.
+        byte[] inputBytes = Encoding.UTF8.GetBytes(input);
+        double md5PerHash = MätSnabbHash(() => MD5.HashData(inputBytes), iterations);
+        double shaPerHash = MätSnabbHash(() => SHA256.HashData(inputBytes), iterations);
 
-        // Test med salt
-        sw.Restart();
-        for (int i = 0; i < iterations; i++)
-        {
-            string salt = SkapaSalt(16);
-            BeraknaHash(input + salt);
-        }
-        sw.Stop();
-        double tidMedSalt = sw.Elapsed.TotalMilliseconds;
+        // Nyckelderiveringsfunktionerna körs bara några gånger. De är så dyra att
+        // 10 000 varv skulle ta timmar, vilket i sig är hela poängen med dem.
+        const int kdfKörningar = 5;
+        double pbkdf2PerHash = MätSnabbHash(
+            () => Rfc2898DeriveBytes.Pbkdf2(input, salt, kostnad.Pbkdf2Iterationer, HashAlgorithmName.SHA256, 32),
+            kdfKörningar);
+        double argon2PerHash = MätSnabbHash(
+            () => Argon2idHash(input, salt, kostnad.Argon2MinneKib, kostnad.Argon2Iterationer),
+            kdfKörningar);
 
-        // Visa resultat
-        SkrivLabel("Resultat:");
-        SkrivVärde($"Utan salt ({iterations:N0} iterationer): ", $"{tidUtanSalt:F2} ms");
-        SkrivVärde($"Med salt ({iterations:N0} iterationer): ", $"{tidMedSalt:F2} ms");
-        
-        double skillnad = tidMedSalt - tidUtanSalt;
-        double procentuellSkillnad = (skillnad / tidUtanSalt) * 100;
-        
-        SkrivVärde("Skillnad: ", $"{skillnad:F2} ms ({procentuellSkillnad:F1}% långsammare med salt)");
-        SkrivVärde("Genomsnitt per hash utan salt: ", $"{tidUtanSalt / iterations:F4} ms");
-        SkrivVärde("Genomsnitt per hash med salt: ", $"{tidMedSalt / iterations:F4} ms");
-        
+        SkrivLabel($"Resultat (arbetskostnad: {kostnad.Namn.Trim()})");
+        Console.WriteLine();
+        Console.WriteLine("  Algoritm     Tid per hash          Gissningar per sekund (en kärna)");
+        Console.WriteLine("  ----------------------------------------------------------------");
+        SkrivRad("MD5", md5PerHash);
+        SkrivRad("SHA-256", shaPerHash);
+        SkrivRad($"PBKDF2", pbkdf2PerHash, $"{kostnad.Pbkdf2Iterationer:N0} iterationer");
+        SkrivRad("Argon2id", argon2PerHash, $"{kostnad.Argon2MinneKib / 1024} MiB minne, {kostnad.Argon2Iterationer} pass");
+
+        Console.WriteLine();
+        double faktor = argon2PerHash / md5PerHash;
+        SkrivVärde("DIN SIFFRA: Argon2id är ", $"{faktor:N0} gånger långsammare än MD5 på den här maskinen");
+        SkrivVärde("Hårdvara: ", $"{Environment.ProcessorCount} logiska kärnor, {RuntimeInformationText()}");
+
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine("💡 Salt gör hashning långsammare men betydligt säkrare!");
+        Console.WriteLine("Så här läser du siffran:");
+        Console.WriteLine("  En angripare med er läckta databas gissar offline, utan spärrar.");
+        Console.WriteLine($"  Med MD5 hinner en enda kärna {(1000 / md5PerHash):N0} gissningar i sekunden.");
+        Console.WriteLine($"  Med Argon2id hinner samma kärna {(1000 / argon2PerHash):N1}.");
+        Console.WriteLine("  Ett grafikkort gör MD5 tusentals gånger snabbare än så, men bromsas");
+        Console.WriteLine("  av Argon2id eftersom varje gissning kräver megabyte av arbetsminne.");
         Console.ResetColor();
+
+        if (argon2PerHash < 250 || argon2PerHash > 500)
+        {
+            Console.WriteLine();
+            SkrivLabel($"Riktvärdet är 250 till 500 ms per inloggning. Din Argon2id landade på {argon2PerHash:F0} ms.");
+            Console.WriteLine("  Kör testet igen med en annan nivå och se hur tiden följer med.");
+        }
     }
 
-	public static string BeraknaHash(string input)
-	{
-		using (SHA256 sha256 = SHA256.Create())
-		{
-			byte[] bytes = Encoding.UTF8.GetBytes(input);
-			byte[] hashBytes = sha256.ComputeHash(bytes);
-			return BitConverter.ToString(hashBytes).Replace("-", "").ToLower();
-		}
-	}
+    static void SkrivRad(string namn, double msPerHash, string? parametrar = null)
+    {
+        Console.ForegroundColor = ConsoleColor.Magenta;
+        Console.Write($"  {namn,-12} ");
+        Console.ForegroundColor = ConsoleColor.White;
+        string tid = msPerHash < 1
+            ? $"{msPerHash * 1000:F1} mikrosekunder"
+            : $"{msPerHash:F1} millisekunder";
+        Console.Write($"{tid,-21} ");
+        Console.WriteLine($"{(1000 / msPerHash),18:N0}");
+        Console.ResetColor();
+        if (parametrar is not null)
+        {
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine($"               ({parametrar})");
+            Console.ResetColor();
+        }
+    }
 
-	static string SkapaSalt(int längd)
-	{
-	byte[] saltBytes = new byte[längd];
-	RandomNumberGenerator.Fill(saltBytes);
-	return Convert.ToBase64String(saltBytes);
-	}
+    static double MätSnabbHash(Action arbete, int antal)
+    {
+        arbete(); // Ett varv först, så att JIT-kompileringen inte hamnar i mätningen.
+        var sw = Stopwatch.StartNew();
+        for (int i = 0; i < antal; i++)
+        {
+            arbete();
+        }
+        sw.Stop();
+        return sw.Elapsed.TotalMilliseconds / antal;
+    }
+
+    static byte[] Argon2idHash(string lösenord, byte[] salt, int minneKib, int iterationer)
+    {
+        using var argon2 = new Argon2id(Encoding.UTF8.GetBytes(lösenord))
+        {
+            Salt = salt,
+            MemorySize = minneKib,
+            Iterations = iterationer,
+            DegreeOfParallelism = 1
+        };
+        return argon2.GetBytes(32);
+    }
+
+    static string RuntimeInformationText()
+        => $"{System.Runtime.InteropServices.RuntimeInformation.OSDescription.Trim()}, .NET {Environment.Version}";
+
+    public static string BeraknaHash(string input)
+    {
+        byte[] bytes = Encoding.UTF8.GetBytes(input);
+        byte[] hashBytes = SHA256.HashData(bytes);
+        return Convert.ToHexStringLower(hashBytes);
+    }
+
+    static string SkapaSalt(int längd)
+    {
+        byte[] saltBytes = RandomNumberGenerator.GetBytes(längd);
+        return Convert.ToBase64String(saltBytes);
+    }
 
     public static bool KontrolleraEasterEggHash(string input)
     {
@@ -211,66 +312,66 @@ public class Program
             0x2b, 0x7b, 0x4c, 0x9d, 0x0f, 0xfe, 0x0b, 0xdc,
             0xbe, 0xdf, 0x3b, 0xa9, 0x87, 0xdc, 0x0b, 0xfc
         };
-        
+
         byte[] nyckel = {
             0x65, 0x65, 0x65, 0x65, 0x65, 0x65, 0x65, 0x65,
             0x65, 0x65, 0x65, 0x65, 0x65, 0x65, 0x65, 0x65,
             0x65, 0x65, 0x65, 0x65, 0x65, 0x65, 0x65, 0x65,
             0x65, 0x65, 0x65, 0x65, 0x65, 0x65, 0x65, 0x65
         };
-        
+
         // Dekoda genom XOR
         byte[] hashBytes = new byte[32];
         for (int i = 0; i < 32; i++)
         {
             hashBytes[i] = (byte)(kodadBytes[i] ^ nyckel[i]);
         }
-        
+
         // Konvertera till hex-sträng
-        string målHash = BitConverter.ToString(hashBytes).Replace("-", "").ToLower();
-        
+        string målHash = Convert.ToHexStringLower(hashBytes);
+
         // Kontrollera endast om användaren skrev hela hashen exakt
         return input.ToLower() == målHash;
     }
 
     static void EasterEgg()
     {
-        Console.Clear();
-        
+        RensaSkarm();
+
         // Animerad rubrik
         Console.ForegroundColor = ConsoleColor.Yellow;
         Console.WriteLine("🎉 GRATTIS! Du hittade det hemliga easter egget! 🎉");
         Console.ResetColor();
-        
+
         System.Threading.Thread.Sleep(1000);
-        
+
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Magenta;
         Console.WriteLine("════════════════════════════════════════════════");
         Console.WriteLine("║              🔓 HASH MASTER MODE 🔓            ║");
         Console.WriteLine("════════════════════════════════════════════════");
         Console.ResetColor();
-        
+
         Console.WriteLine();
         Console.ForegroundColor = ConsoleColor.Cyan;
         Console.WriteLine("Du har låst upp den hemliga Hash Master-funktionen!");
         Console.WriteLine("Här kan du utforska avancerade hash-funktioner...");
         Console.ResetColor();
-        
+
         Console.WriteLine();
-        
+
         while (true)
         {
             SkrivLabel("🎯 Hash Master Meny:");
             Console.WriteLine("  1. 🌈 Regnbågs-hash (olika algoritmer)");
             Console.WriteLine("  2. 🎲 Hash-gissning (gissa rätt input)");
-            Console.WriteLine("  3. 🔍 Hash-kollision simulator");
+            Console.WriteLine("  3. 🔍 Lavineffekt: en bokstav ändrar allt");
             Console.WriteLine("  4. 🚪 Tillbaka till huvudmenyn");
             Console.WriteLine();
-            
+
             SkrivPrompt("Välj din hash-magi: ");
             var val = Console.ReadLine();
-            
+
             switch (val)
             {
                 case "1":
@@ -280,10 +381,10 @@ public class Program
                     HashGissning();
                     break;
                 case "3":
-                    KollisionSimulator();
+                    Lavineffekt();
                     break;
                 case "4":
-                    Console.Clear();
+                    RensaSkarm();
                     SkrivRubrik("Hash Demo - Med och utan Salt");
                     return;
                 default:
@@ -304,70 +405,76 @@ public class Program
             return;
         }
 
+        byte[] bytes = Encoding.UTF8.GetBytes(input);
+
         Console.WriteLine();
-        SkrivLabel("🎨 Dina hash-värden i olika färger:");
-        
-        // SHA-256 (Röd)
-        Console.ForegroundColor = ConsoleColor.Red;
-        Console.Write("🔴 SHA-256: ");
-        Console.ForegroundColor = ConsoleColor.White;
-        Console.WriteLine(BeraknaHash(input));
-        
-        // MD5-liknande (Grön) - simulerad med kort SHA-256
-        Console.ForegroundColor = ConsoleColor.Green;
-        Console.Write("🟢 MD5-stil: ");
-        Console.ForegroundColor = ConsoleColor.White;
-        Console.WriteLine(BeraknaHash(input).Substring(0, 32));
-        
-        // "Blå hash" - omvänd
-        Console.ForegroundColor = ConsoleColor.Blue;
-        Console.Write("🔵 Omvänd: ");
-        Console.ForegroundColor = ConsoleColor.White;
-        Console.WriteLine(new string(BeraknaHash(input).ToCharArray().Reverse().ToArray()));
-        
+        SkrivLabel("🎨 Samma text genom fyra olika hashfunktioner:");
+
+        SkrivHashRad(ConsoleColor.Red, "🔴 MD5     ", Convert.ToHexStringLower(MD5.HashData(bytes)), "trasig, kollisioner på sekunder");
+        SkrivHashRad(ConsoleColor.Yellow, "🟡 SHA-1   ", Convert.ToHexStringLower(SHA1.HashData(bytes)), "trasig sedan SHAttered 2017");
+        SkrivHashRad(ConsoleColor.Green, "🟢 SHA-256 ", Convert.ToHexStringLower(SHA256.HashData(bytes)), "stark, men för snabb för lösenord");
+        SkrivHashRad(ConsoleColor.Blue, "🔵 SHA-512 ", Convert.ToHexStringLower(SHA512.HashData(bytes)), "stark, dubbelt så lång utdata");
+
+        Console.WriteLine();
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine("Lägg märke till att längden är fast oavsett hur lång texten är.");
         Console.ResetColor();
         Console.WriteLine();
+    }
+
+    static void SkrivHashRad(ConsoleColor färg, string namn, string hash, string kommentar)
+    {
+        Console.ForegroundColor = färg;
+        Console.Write(namn + ": ");
+        Console.ForegroundColor = ConsoleColor.White;
+        Console.WriteLine(hash);
+        Console.ForegroundColor = ConsoleColor.DarkGray;
+        Console.WriteLine($"             {kommentar}");
+        Console.ResetColor();
     }
 
     static void HashGissning()
     {
         Console.WriteLine();
         SkrivLabel("🎲 Hash-gissning: Kan du gissa rätt input?");
-        
+
         string[] hemligheter = { "katt", "hund", "fisk", "fågel", "häst", "ko", "får", "gris", "mus", "råtta" };
-        Random rand = new Random();
-        string hemligInput = hemligheter[rand.Next(hemligheter.Length)];
+        // RandomNumberGenerator, inte Random. I en säkerhetskurs väljer vi rätt slump även i ett spel.
+        string hemligInput = hemligheter[RandomNumberGenerator.GetInt32(hemligheter.Length)];
         string målHash = BeraknaHash(hemligInput);
-        
+
         Console.WriteLine();
         SkrivVärde("🎯 Mål-hash (första 12 tecken): ", målHash.Substring(0, 12) + "...");
         SkrivLabel("💡 Ledtråd: Det är ett djur (på svenska, gemener)");
-        
+
         int försök = 0;
         int maxFörsök = 5;
-        
+
         while (försök < maxFörsök)
         {
             Console.WriteLine();
             SkrivPrompt($"Gissning {försök + 1}/{maxFörsök}: ");
             string? gissning = Console.ReadLine();
-            
+
             if (string.IsNullOrEmpty(gissning))
             {
                 SkrivFelmeddelande("Tom gissning räknas inte!");
                 continue;
             }
-            
+
             försök++;
-            string gissningHash = BeraknaHash(gissning);
-            
-            if (gissning.ToLower() == hemligInput)
+            string gissningHash = BeraknaHash(gissning.ToLower());
+
+            if (gissningHash == målHash)
             {
                 Console.WriteLine();
                 Console.ForegroundColor = ConsoleColor.Green;
                 Console.WriteLine("🎉 RÄTT! Du är en sann Hash Master!");
                 Console.ForegroundColor = ConsoleColor.Yellow;
                 Console.WriteLine($"⭐ Du gissade rätt på {försök} försök!");
+                Console.ForegroundColor = ConsoleColor.Cyan;
+                Console.WriteLine("Notera hur du gjorde det: du gissade en klartext och jämförde hashar.");
+                Console.WriteLine("Det är exakt så en angripare knäcker en läckt lösenordsdatabas.");
                 Console.ResetColor();
                 return;
             }
@@ -378,7 +485,7 @@ public class Program
                 Console.ForegroundColor = ConsoleColor.Gray;
                 Console.WriteLine($"Din hash: {gissningHash.Substring(0, 12)}...");
                 Console.ResetColor();
-                
+
                 if (försök == maxFörsök)
                 {
                     Console.WriteLine();
@@ -390,47 +497,47 @@ public class Program
         }
     }
 
-    static void KollisionSimulator()
+    static void Lavineffekt()
     {
         Console.WriteLine();
-        SkrivLabel("🔍 Hash-kollision Simulator");
+        SkrivLabel("🔍 Lavineffekt: hur mycket ändras av en enda bokstav?");
         Console.WriteLine();
-        Console.ForegroundColor = ConsoleColor.Cyan;
-        Console.WriteLine("Den här funktionen simulerar hur svårt det är att hitta hash-kollisioner.");
-        Console.WriteLine("(I verkligheten skulle detta ta miljoner år för SHA-256!)");
-        Console.ResetColor();
-        
-        Console.WriteLine();
-        SkrivPrompt("Tryck ENTER för att starta simulationen...");
-        Console.ReadLine();
-        
-        Console.WriteLine();
-        SkrivLabel("🔄 Söker efter kollision...");
-        
-        // Simulera att vi söker (helt fake för demo)
-        for (int i = 0; i < 10; i++)
+
+        SkrivPrompt("Ange en text: ");
+        string? a = Console.ReadLine();
+        if (string.IsNullOrEmpty(a))
         {
-            Console.Write(".");
-            System.Threading.Thread.Sleep(200);
+            SkrivFelmeddelande("Ingen text angavs.");
+            return;
         }
-        
+
+        SkrivPrompt("Ange nästan samma text, ändra en enda bokstav: ");
+        string? b = Console.ReadLine();
+        if (string.IsNullOrEmpty(b))
+        {
+            SkrivFelmeddelande("Ingen text angavs.");
+            return;
+        }
+
+        byte[] hashA = SHA256.HashData(Encoding.UTF8.GetBytes(a));
+        byte[] hashB = SHA256.HashData(Encoding.UTF8.GetBytes(b));
+
         Console.WriteLine();
+        SkrivVärde($"SHA-256 av \"{a}\": ", Convert.ToHexStringLower(hashA));
+        SkrivVärde($"SHA-256 av \"{b}\": ", Convert.ToHexStringLower(hashB));
+
+        int olikaBitar = 0;
+        for (int i = 0; i < hashA.Length; i++)
+        {
+            olikaBitar += System.Numerics.BitOperations.PopCount((uint)(hashA[i] ^ hashB[i]));
+        }
+
         Console.WriteLine();
-        
-        Console.ForegroundColor = ConsoleColor.Red;
-        Console.WriteLine("⚠️  KOLLISION HITTAD! (Detta är bara en simulation)");
-        Console.ResetColor();
-        
-        Console.WriteLine();
-        SkrivVärde("Input 1: ", "hemlig_text_123");
-        SkrivVärde("Input 2: ", "annan_text_456");
-        SkrivVärde("Hash 1:  ", "a1b2c3d4e5f6...");
-        SkrivVärde("Hash 2:  ", "a1b2c3d4e5f6...");
-        
-        Console.WriteLine();
-        Console.ForegroundColor = ConsoleColor.Yellow;
-        Console.WriteLine("💡 I verkligheten är SHA-256 så säker att det skulle ta");
-        Console.WriteLine("   längre tid än universums ålder att hitta en kollision!");
+        SkrivVärde("Antal bitar som skiljer: ", $"{olikaBitar} av 256 ({olikaBitar / 2.56:F0} procent)");
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.WriteLine("En bra hashfunktion ändrar ungefär hälften av bitarna, oavsett hur");
+        Console.WriteLine("liten ändringen i indata är. Det gör att hashen inte avslöjar något");
+        Console.WriteLine("om hur nära din gissning låg.");
         Console.ResetColor();
         Console.WriteLine();
     }
